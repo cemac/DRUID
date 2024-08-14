@@ -10,7 +10,6 @@ import kdp_functions as kdpfun
 import math
 import datetime as dt
 from scipy import stats
-
 from vp_io import read_file
 
 def field_fill_to_nan(radar, mask_field):
@@ -28,20 +27,13 @@ def field_fill_to_nan(radar, mask_field):
         print ("{} is not in radar.fields.keys() {}".format(mask_field,radar.fields.keys()))
     return
 
-
-def static_index_for_csv_file(radar_file, file_list_length, field_list, lat, lon, alt,met_office=False):
-
-    # open radar file
-    #if(met_office):
-    (radar, unit_dict, long_names, short_names) = read_file(0, '0000', radar_file, field_list,met_office=met_office)
-    #else:radar = pyart.io.read(radar_file)
-
-    #elevations = radar.elevation['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps)))
-    altitudes = radar.fields['scan_altitude']['data']
-    altitudes = altitudes.reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps),radar.ngates))
-
+# this will now get all the indices for the cvp
+def static_index_for_csv_file(radar, el_sort_ix, lat, lon, avg_range_delta, equidistant_alt, equidistant_bound, verbose=True):
+    
     lat_data = radar.gate_latitude['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps),radar.ngates))
+    lat_data=lat_data[el_sort_ix,:,:]
     lon_data = radar.gate_longitude['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps),radar.ngates))
+    lon_data=lon_data[el_sort_ix]
     #alt_data = radar.gate_altitude['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps),radar.ngates))
 
     #in_lat = (np.abs(lat_data[0,:,:] - lat)).argmin()
@@ -49,14 +41,88 @@ def static_index_for_csv_file(radar_file, file_list_length, field_list, lat, lon
     X = np.sqrt( np.square( lat_data[0,:,:] - lat ) +  np.square( lon_data[0,:,:] - lon ) )
     idx = np.where( X == X.min() )
 
-    in_bin_range = idx[1]
-    in_bin_azimuth = idx[0]
+    r = idx[1][0] # centre radius index
+    az = idx[0][0] # centre az index
 
-    index_list = np.array(list(zip(in_bin_range, in_bin_azimuth, [0]))).tolist()
+    # now find the indices in this CVP
+    # get the number of elements corresponding to the 20 km ditance.
+    steps_in_range_delta = int(avg_range_delta * 1000/(radar.range['data'][1]-radar.range['data'][0]))
+    if (verbose):
+        print ("int({} * {}) = {}".format(avg_range_delta,1000/(radar.range['data'][1]-radar.range['data'][0]),steps_in_range_delta))
+        print ("steps_in_range_delta are {} and it corresponds to {} km".format(steps_in_range_delta,avg_range_delta))
 
+    r_indxs = get_r_indexes(r,steps_in_range_delta,len(radar.range['data']),verbose=verbose)
+
+    # get the size of the avg_az_delta based on steps_in_range_delta and r
+    range_dist = (radar.range['data'][1]-radar.range['data'][0]) * r # steps_in_range_delta * r
+
+    if(verbose):
+        print ("range_dist for r = {} is {} originally it was {}".format(r,range_dist,avg_range_delta))
+        print (" az resolution is {}".format((360.0/(radar.nrays/radar.nsweeps))))
+        print ("1/2 beam angle is {}".format((360.0/(radar.nrays/radar.nsweeps))/2.0))
+        print ("in radians {}".format(math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0)))
+
+    # Note: in the case of cvp dynamic the avg_az_delta=5 and was not modified by avg_range_delta
+    az_size = 2.0 * range_dist * math.tan(math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0))
+    if(verbose):print ("azimuthal size for this location is 2.0 * {} / math.ctan({})= 2.0 * {} * {} = {}".format(range_dist,math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0),range_dist, 1/math.tan(math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0)),az_size))
+    avg_az_delta = int(avg_range_delta * 1000/az_size)
+    if(verbose):print ("int({} * 1000/{}) = avg_az_delta is {}".format(avg_range_delta,az_size,avg_az_delta))
+
+    az_indxs = get_az_indexes(az,avg_az_delta, verbose=verbose)
+
+    # get altitudes from the radar object
+    altitudes = radar.fields['scan_altitude']['data']
+    # reshape the field to 3D array
+    altitudes = altitudes.reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps),radar.ngates))
+
+    # get altitudes for the column values
+    column_altitudes = altitudes[np.ix_(range(0,radar.nsweeps),az_indxs,r_indxs)] 
+    # resort the elevations
+    column_altitudes=column_altitudes[el_sort_ix,:,:]
+
+    # Note: this next part calculating the el_indxs was not done for cvp dynamic
+
+    if verbose:
+        print ("!!!! column_altitudes.shape")
+        print (column_altitudes.shape)
+        print ("np.unique(column_altitudes)")
+        print (len(np.unique(column_altitudes)))
+
+    # calculate mean altitudes for each range of the selected column - JCrook not sure what this is for!
+    altitudes_to_smooth = np.nanmean(column_altitudes,axis=1)
+    if verbose:
+        print ("altitudes_to_smooth")
+        print (altitudes_to_smooth.shape)
+        print ("np.nanmean(altitudes_to_smooth,axis=1)")
+        print (np.nanmean(altitudes_to_smooth,axis=1).shape)
+    # flattened altitude values array
+    flat_altitudes = altitudes_to_smooth.flatten().reshape((np.prod(altitudes_to_smooth.shape),1))
+    if verbose: print ("flat_altitudes.shape is {}".format(flat_altitudes.shape))
+
+    # get the el_indx for each height
+    el_indxs=get_el_indexes(column_altitudes.flatten(), len(equidistant_alt), equidistant_bound)
+    
+    index_list =[r_indxs, az_indxs, el_indxs]
+    print('r',r_indxs)
+    print('az', az_indxs)
     return index_list
 
-
+# this function converts the indices in a cvp to the voxels in a radar file
+# Note that not all radar files have their elevations in the same order but
+# the indices have been calculated with the elevations sorted first
+def cvp_static_indexes_to_voxels(nrad,naz,nel,r_indx,az_indx,el_indxs):
+    polar_data=np.zeros((nel,naz,nrad),int)+np.nan
+    this_polar_data=polar_data[np.ix_(np.arange(nel), az_indx, r_indx)]
+    this_polar_data=this_polar_data.flatten()
+    nheights=len(el_indxs)
+    for h in range(nheights):
+        this_el_ixs=el_indxs[h]
+        if len(this_el_ixs)>0:
+            this_polar_data[this_el_ixs]=1
+    polar_data[np.ix_(np.arange(nel), az_indx, r_indx)]=this_polar_data.reshape(nel,len(az_indx), len(r_indx))
+    voxel_ix=np.where(polar_data==1)
+    return voxel_ix
+    
 def savitzky_golay(y, window_size, order, deriv=0, rate=1):
     r"""Smooth (and optionally differentiate) data with a Savitzky-Golay filter.
     The Savitzky-Golay filter removes high frequency noise from data.
@@ -178,11 +244,10 @@ def smooth(x,window_len=11,window='hanning'):
     return y
 
 
-def altitude_parameter_averaging_cvp(radar, cvp_index_data, field, avg_range_delta=5, azimuth_exclude = None, verbose=True):
+def altitude_parameter_averaging_cvp(radar, cvp_index_data, field, azimuth_exclude = None, verbose=True):
 
     if verbose:
         print ("altitude_parameter_averaging_cvp")
-        print ("cvp_index_data = {}, field = {}, avg_range_delta = {}".format(cvp_index_data, field, avg_range_delta))
 
     bin_centers = []
     bin_count = []
@@ -200,10 +265,11 @@ def altitude_parameter_averaging_cvp(radar, cvp_index_data, field, avg_range_del
 
     if(verbose):
         print ("altitude_parameter_averaging_cvp is running for the field {}".format(field))
-        print ("cvp_index_data = [bin_elevation,bin_azimuth,bin_range], field are {} , {}".format(cvp_index_data, field))
+
     mask_field = field
     #expected_ele_index = int(cvp_index_data[2])
-    [r,az,el] = map(int, cvp_index_data)
+    # Note: el_indxs are not used here
+    [r_indxs,az_indxs,el_indxs] = cvp_index_data
 
     #elevations = radar.elevation['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps)))
 
@@ -212,37 +278,6 @@ def altitude_parameter_averaging_cvp(radar, cvp_index_data, field, avg_range_del
     field_fill_to_nan(radar, mask_field)
     try:data = np.where(data == radar.fields[field]['_FillValue'], np.nan, data)
     except:print ("'_FillValue' is not used in the Field {}".format(field))
-
-    # get the right az indexes
-    if(az<avg_az_delta):
-        from_az = range(359 + (az-avg_az_delta),360)
-        to_az = range(0,az+avg_az_delta+1)
-    elif(az+avg_az_delta>359):
-        from_az = range(0,(az+avg_az_delta)-359)
-        to_az = range(az-avg_az_delta,360)
-    else:
-        from_az = range(az-avg_az_delta,az)
-        to_az = range(az,az+avg_az_delta+1)
-
-    az_indxs = []
-    az_indxs.extend(from_az)
-    az_indxs.extend(to_az)
-
-    # get the number of elements corresponding to the 20 km ditance.
-    steps_in_range_delta = int(avg_range_delta * 1000/(radar.range['data'][1]-radar.range['data'][0]))
-
-    if(r+steps_in_range_delta>len(radar.range['data'])):
-        from_r = range(r-steps_in_range_delta-1,r)
-        to_r =  range(r,len(radar.range['data']))
-    elif(r-steps_in_range_delta<0):
-        from_r = range(0,r)
-        to_r = range(r,r+steps_in_range_delta)
-    else:
-        from_r = range(r-steps_in_range_delta,r)
-        to_r = range(r,r+steps_in_range_delta+1)
-    r_indxs = []
-    r_indxs.extend(from_r)
-    r_indxs.extend(to_r)
 
     column = data[np.ix_(range(0,radar.nsweeps),az_indxs,r_indxs)]
 
@@ -373,15 +408,26 @@ def get_r_indexes(r, steps_in_range_delta, max_range,verbose = True):
     r_indxs.extend(from_r)
     r_indxs.extend(to_r)
     return(r_indxs)
+    
+# col_altitudes should be a flattened array of all horizontal points in cvp
+def get_el_indexes(col_altitudes, nheights, height_bounds):
+    el_indxs=[]
+    for h in range(nheights):
+        if h == nheights-1:
+            this_el_indxs=np.where(col_altitudes>=height_bounds[h])
+        else:
+            this_el_indxs=np.where((col_altitudes>=height_bounds[h]) & (col_altitudes<height_bounds[h+1]))
+        el_indxs.append(this_el_indxs[0])
+        
+    return el_indxs
 
-def altitude_parameter_averaging_cvp_static(radar, field, cvp_index, avg_range_delta,
-    azimuth_exclude = None, min_h = None, max_h = None, h_step = None, store_indexes=False, verbose=True):
+def altitude_parameter_averaging_cvp_static(radar, field, cvp_indxs, equidistant_alt,
+    azimuth_exclude = None, store_indexes=False, verbose=True):
 
-    [r,az,el] = map(int, cvp_index)
+    [r_indxs,az_indxs,el_indxs] = cvp_indxs
 
     if verbose:
         print ("altitude_parameter_averaging_cvp_static")
-        print ("field = {}, bin_range = {}, bin_azimuth = {}, bin_elevation = {}, avg_range_delta = {}".format(field, r,az,el, avg_range_delta))
 
     bin_centers = []
     bin_count = []
@@ -395,83 +441,21 @@ def altitude_parameter_averaging_cvp_static(radar, field, cvp_index, avg_range_d
     std_values = []
     timeofsweep = []
 
-    # need to get the right az delta for this particular range
-    # az delta in degrees
-    avg_az_delta = 1
-
     mask_field = field
     #expected_ele_index = el
 
     field_fill_to_nan(radar, mask_field)
 
-    #elevations = radar.elevation['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps)))
+    # get the elevations in ascending order as was used for static indices
+    elevations = radar.elevation['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps)))
+    elevations=np.unique(elevations, axis=1)
+    el_sort_ix=np.argsort(elevations)
 
     data = np.array(radar.fields[field]['data'].reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps),radar.ngates)))
 
-    # get the number of elements corresponding to the 20 km ditance.
-    steps_in_range_delta = int(avg_range_delta * 1000/(radar.range['data'][1]-radar.range['data'][0]))
-    if (verbose):
-        print ("int({} * {}) = {}".format(avg_range_delta,1000/(radar.range['data'][1]-radar.range['data'][0]),steps_in_range_delta))
-        print ("steps_in_range_delta are {} and it corresponds to {} km".format(steps_in_range_delta,avg_range_delta))
-
-    r_indxs = get_r_indexes(r,steps_in_range_delta,len(radar.range['data']),verbose=verbose)
-
-    # get the size of the avg_az_delta based on steps_in_range_delta and r
-    range_dist = (radar.range['data'][1]-radar.range['data'][0]) * r # steps_in_range_delta * r
-
-    if(verbose):
-        print ("range_dist for r = {} is {} originally it was {}".format(r,range_dist,avg_range_delta))
-        print (" az resolution is {}".format((360.0/(radar.nrays/radar.nsweeps))))
-        print ("1/2 beam angle is {}".format((360.0/(radar.nrays/radar.nsweeps))/2.0))
-        print ("in radians {}".format(math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0)))
-    az_size = 2.0 * range_dist * math.tan(math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0))
-    if(verbose):print ("azimuthal size for this location is 2.0 * {} / math.ctan({})= 2.0 * {} * {} = {}".format(range_dist,math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0),range_dist, 1/math.tan(math.radians((360.0/(radar.nrays/radar.nsweeps))/2.0)),az_size))
-    avg_az_delta = int(avg_range_delta * 1000/az_size)
-    if(verbose):print ("int({} * 1000/{}) = avg_az_delta is {}".format(avg_range_delta,az_size,avg_az_delta))
-
-    #print "az_indxs"
-    az_indxs = get_az_indexes(az,avg_az_delta, verbose=verbose)
 
     column = data[np.ix_(range(0,radar.nsweeps),az_indxs,r_indxs)]
-
-    # get altitudes from the radar object
-    altitudes = radar.fields['scan_altitude']['data']#[radar.sweep_start_ray_index['data'][sweep], :]
-
-    # reshape the field to 3D array
-    altitudes = altitudes.reshape((radar.nsweeps,int(radar.nrays/radar.nsweeps),radar.ngates))
-
-    # get altitudes for the column values
-    column_altitudes = altitudes[np.ix_(range(0,radar.nsweeps),az_indxs,r_indxs)] #13.12.2021 test
-    #column_altitudes = altitudes[np.ix_(range(0,100),az_indxs,r_indxs)]
-    #get the voxel size for the altitude levels
-
-    base = 5 # precision
-
-    if h_step is None: h_step = int(1000 * round(((az_size)/1000)))
-
-    if min_h is None: min_h = int(1000 * base * round((np.nanmin(altitudes)/1000)/base))
-
-    if max_h is None: max_h = int(1000 * base * round((np.nanmax(altitudes)/1000)/base))
-
-    equidistant_alt = np.linspace((min_h + h_step/2), (max_h - h_step/2), num=int(max_h/h_step))
-    equidistant_bound = np.linspace((min_h), (max_h), num=int(max_h/h_step)+1)
-
-    if verbose:
-        print ("!!!! column_altitudes.shape")
-        print (column_altitudes.shape)
-        print ("np.unique(column_altitudes)")
-        print (len(np.unique(column_altitudes)))
-    # calculate mean altitudes for each range of the selected column
-    altitudes_to_smooth = np.nanmean(column_altitudes,axis=1)
-    if verbose:
-        print ("altitudes_to_smooth")
-        print (altitudes_to_smooth.shape)
-        print ("np.nanmean(altitudes_to_smooth,axis=1)")
-        print (np.nanmean(altitudes_to_smooth,axis=1).shape)
-
-    # flattened altitude values array
-    flat_altitudes = altitudes_to_smooth.flatten().reshape((np.prod(altitudes_to_smooth.shape),1))
-    if verbose: print ("flat_altitudes.shape is {}".format(flat_altitudes.shape))
+    column=column[el_sort_ix,:,:]
 
     if mask_field in ['dBuZ', 'dBZ', 'dBZ_ac', 'dBuZv', 'dBZv']:column = np.power(10, column / 10.0)
 
@@ -491,29 +475,32 @@ def altitude_parameter_averaging_cvp_static(radar, field, cvp_index, avg_range_d
         (meteoMask) = kdpfun.generate_meteo_mask(elev, rays, bins, flags, rhohv, METEO_THRESH)
         column = kdpfun.unwrap_phidp(elev, rays, bins, meteoMask, column)
 
-    # get mean of means for equidistant
-    equdist_mean = np.zeros(equidistant_alt.shape[0])*np.nan
-    equdist_std = np.zeros(equidistant_alt.shape[0])*np.nan
-    equdist_count = np.zeros(equidistant_alt.shape[0])*np.nan
-    equdist_total = np.zeros(equidistant_alt.shape[0])*np.nan
-    equdist_indexes = [None]*equidistant_alt.shape[0] if store_indexes else None
+    # get mean of means for equidistant altitudes
+    nheights=len(equidistant_alt)
+    equdist_mean = np.zeros(nheights)*np.nan
+    equdist_std = np.zeros(nheights)*np.nan
+    equdist_count = np.zeros(nheights)*np.nan
+    equdist_total = np.zeros(nheights)*np.nan
+    equdist_indexes = [None]*nheights if store_indexes else None
 
-    for item, boundary  in enumerate(equidistant_bound[0:-1]):
+    column=column.flatten()
+    for h in range(nheights):
+        el_ixs=el_indxs[h]
+        if len(el_ixs)>0:
+            temp_column = column[el_ixs]
+            valid_indexes = np.where(np.isfinite(temp_column))[0]
+            if len(valid_indexes)>0:
+                equdist_mean[h] = np.mean(temp_column[valid_indexes])
+                equdist_std[h] = np.std(temp_column[valid_indexes])
+            equdist_count[h] = len(valid_indexes)
+            equdist_total[h] = len(temp_column)
+            if store_indexes:
+                # Store indexes that are included in generating means
+                index_bitmap=np.zeros(len(el_ixs),int)
+                index_bitmap[valid_indexes]=1
+                equdist_indexes[h] = index_bitmap
 
-        if(item == len(equidistant_bound)-1):bin_indexes = np.where(column_altitudes>=boundary)
-        else:bin_indexes = np.where((column_altitudes>=boundary) & (column_altitudes<equidistant_bound[item+1]))
-
-        temp_column = column[bin_indexes]
-        valid_indexes = np.where(np.isfinite(temp_column))[0]
-        equdist_mean[item] = np.mean(temp_column[valid_indexes])
-        equdist_std[item] = np.std(temp_column[valid_indexes])
-        equdist_count[item] = len(valid_indexes)
-        equdist_total[item] = len(temp_column)
-        if store_indexes:
-            # Store indexes that are included in generating means
-            equdist_indexes[item] = tuple(np.stack(bin_indexes)[:, valid_indexes])
-
-    if len(equidistant_alt) >= 300: win = 5
+    if nheights >= 300: win = 5
     else:win = 3
 
     equdist_mean = smooth(equdist_mean,win)
@@ -526,7 +513,7 @@ def altitude_parameter_averaging_cvp_static(radar, field, cvp_index, avg_range_d
                                        radar.time['units'],
                                        radar.time['calendar'])
 
-    return equidistant_alt, equdist_count, equdist_mean, equdist_std, timeofsweep, equdist_indexes
+    return equdist_count, equdist_mean, equdist_std, timeofsweep, equdist_indexes
     #return bin_centers, bin_count, bin_means, bin_std, timeofsweep
 
 
@@ -643,9 +630,9 @@ def altitude_parameter_averaging_qvp(radar, elevation, field, azimuth_exclude, v
             return (altitudes, observation_count, mean_values, std_values, timeofsweep)
 
 
-def time_height(list_of_files, field_list, cvp_indexes = None, avg_range_delta = 5,
+def time_height(list_of_files, field_list, cvp_indexes = None, equidistant_alt=None,
                 elevation = None, count_threshold=0,  met_office=False,
-                azimuth_exclude = [], min_h = None, max_h = None, h_step = None,
+                azimuth_exclude = [], 
                 store_indexes=False,
                 verbose=False, vp_mode='qvp'):
 
@@ -669,23 +656,15 @@ def time_height(list_of_files, field_list, cvp_indexes = None, avg_range_delta =
         testfile = h5.File(list_of_files[0], 'r')
         times = list(testfile['lp'].keys())
         list_of_files = list(itertools.chain.from_iterable(itertools.repeat(x, len(times)) for x in list_of_files))
-        if not vp_mode == 'qvp':
-            cvp_indexes = cvp_indexes * len(list_of_files)
         testfile.close()
     else:
-        if not vp_mode == 'qvp':
-            cvp_indexes = np.tile(cvp_indexes,(len(list_of_files),1))
         times = [defaulttime]
-
 
 
     for f, file_ in enumerate(list_of_files):
         if (verbose):
             print ("file f {} is {}".format(f,list_of_files[f]))
             print ("for loop file is {}".format(file_))
-
-        if not vp_mode == 'qvp':
-            cvp_index = cvp_indexes[f]
 
 
         # Edited function call so that different call not needed for metoffice=True
@@ -704,16 +683,15 @@ def time_height(list_of_files, field_list, cvp_indexes = None, avg_range_delta =
                             azimuth_exclude = azimuth_exclude, verbose=verbose,
                             meteo=False, METEO_THRESH=0.7)
                 elif vp_mode == 'cvp_static':
-                    [r,az,el] = map(int, cvp_index)
-                    (alts, counts, means, standard_deviations, timeofsweep, indexes) = \
+                    (counts, means, standard_deviations, timeofsweep, indexes) = \
                         altitude_parameter_averaging_cvp_static(radar, field,
-                            cvp_index, avg_range_delta,
-                            azimuth_exclude = azimuth_exclude, min_h=min_h,
-                            max_h=max_h, h_step=h_step, store_indexes=store_indexes, verbose=verbose)
+                            cvp_indexes, equidistant_alt,
+                            azimuth_exclude = azimuth_exclude, store_indexes=store_indexes, verbose=verbose)
+                    alts=equidistant_alt
                 elif vp_mode == 'cvp_dynamic':
                     (alts, counts, means, standard_deviations, timeofsweep) = \
                         altitude_parameter_averaging_cvp(radar, field,
-                            cvp_index, avg_range_delta, azimuth_exclude = azimuth_exclude,
+                            cvp_indexes, azimuth_exclude = azimuth_exclude,
                             verbose=verbose)
                 else:
                     print("vp_mode unrecognised")

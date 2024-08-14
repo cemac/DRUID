@@ -1,5 +1,5 @@
 """
-Routines for reading NIMROD ODIM_H5 Aggregated files.
+ Routines for reading NIMROD ODIM_H5 Aggregated files.
 
 """
 
@@ -541,6 +541,96 @@ def read_file(f, time, file_, fields,unit_dict=[],long_names=[], short_names=[],
     return (radar, unit_dict, long_names, short_names)
 
 
+# this writes the indices of the radar data that make up this CVP. 
+# Within the CVP files there will be a mask of 1's and 0's for each of the el_indxs at each time
+# for each variable to show which of these have valid data
+# Inputs:
+#     output_file is where we will store this data
+#     radar_fname is the radar file we used to create the indices - we save this as a global attribute
+#     poss_indxs is [r_indx, az_indx, el_indxs]
+#     equidistant_alt is an array of the heights within a CVP
+def write_static_cvp_indices_netcdf(output_file, radar_fname, poss_indxs, equidistant_alt):
+
+    output = Dataset(output_file, 'w', format='NETCDF4')
+    output.source='Created from '+radar_fname
+    r_indx=poss_indxs[0]
+    az_indx=poss_indxs[1]
+    el_indxs=poss_indxs[2]
+    nind=len(r_indx)
+    ind_dim = output.createDimension('r_indx_dim', nind)
+    nind=len(az_indx)
+    ind_dim = output.createDimension('az_indx_dim', nind)
+    poss_ind_r = output.createVariable('r_indx', np.int32, ('r_indx_dim'))
+    poss_ind_az = output.createVariable('az_indx', np.int32, ('az_indx_dim'))
+    poss_ind_r[:]=r_indx
+    poss_ind_az[:]=az_indx
+    nheights=len(equidistant_alt) 
+    height_dim = output.createDimension('Height', nheights)
+    height_var = output.createVariable('Height', np.float32, ('Height',))
+    height_var[:]=equidistant_alt
+    height_var.units = "metres above sea level"
+    # as the el_indxs have different lengths we will write each height separately
+    for h in range(nheights): 
+        this_nind=len(el_indxs[h])  
+        if this_nind>0:
+            # netcdf doesn't like '/' in dimension names so el dimensions will have names el_indx_height_<h>_len
+            # each el_indx variable will be in el_indx/height_<h>_el
+            height_name='height_{h:d}'.format(h=h)
+            basename='el_indx'
+            dimname=basename+'_'+height_name+'_len'
+            ind_dim = output.createDimension(dimname, this_nind) 
+            ind_el = output.createVariable(basename+'/'+height_name+'_el', np.int32, (dimname))
+            ind_el[:]=el_indxs[h]  
+
+    
+    output.close()
+    
+# code to read static cvp indices   
+class Static_cvp_ind():
+    def __init__(self, static_cvp_data):
+        self.heights=[]
+        self.height_units=''
+        self.r_indx=[]
+        self.az_indx=[]
+        for var in static_cvp_data.variables:
+            if var=='Height':
+                heights_coord=static_cvp_data.variables[var]
+                self.heights=heights_coord[:]
+                self.height_units=heights_coord.units
+            elif var=='r_indx':
+                self.r_indx=static_cvp_data.variables[var][:]
+            elif var=='az_indx':
+                self.az_indx=static_cvp_data.variables[var][:]
+            else:
+                print('unexpected var', var)
+
+        self.el_indxs=[[]]*len(self.heights)
+        for g in static_cvp_data.groups:
+            if g=='el_indx':
+                for v in static_cvp_data[g].variables:
+                    # get the height index from the name
+                    wsplit=v.split('_')
+                    if wsplit[0]=='height' and wsplit[2]=='el':
+                        h=int(wsplit[1])
+                        self.el_indxs[h]=static_cvp_data[g].variables[v][:]
+                    else:        
+                        print(wsplit)
+       
+    def print(self):
+        print(len(self.heights),'heights:',self.heights, self.height_units)
+        print('r_indx', self.r_indx)
+        print('az_indx',self.az_indx)
+        print('el_indxs',self.el_indxs)
+        
+    def get_indxs(self):
+        return [self.r_indx, self.az_indx, self.el_indxs]
+        
+def read_static_cvp_indices(cvp_pathname):
+    
+    static_cvp_data=Dataset(cvp_pathname, "r", format="NETCDF4")
+    this_static_cvp=Static_cvp_ind(static_cvp_data)
+    return this_static_cvp
+    
 def output_netcdf(data_list, output_file, profile_type, field_list, elevation, azimuth_exclude, n_time, verbose=False):
 
     [result_dict,
@@ -567,18 +657,32 @@ def output_netcdf(data_list, output_file, profile_type, field_list, elevation, a
 
     ## Add values to the dimension variables
     heights[:] = result_dict['alts']
+    Nh=len(result_dict['alts'])
     times[:] = np.array(number_times)
+    Nt=len(number_times)
     times.units = time_units
     times.calendar = "gregorian"
     heights.units = "metres above sea level"
 
+    # create dimensions for el_indices - all fields should have the same length of el_indices so don't need to define them in each field
+    field=field_list[0]
+    if indexes_dict[field] is not None:
+        el_ind_for_height_dimnames=[None]*Nh 
+        el_ind_for_height_len=np.zeros(Nh, int) 
+        for h in range(Nh): 
+            if isinstance(indexes_dict[field][0][h], np.ndarray): 
+                this_len=len(indexes_dict[field][0][h]) 
+                height_name='height_{h:d}'.format(h=h)
+                basename='el_indx'
+                dimname=basename+'_'+height_name+'_len'
+                ind_dim = output.createDimension(dimname, this_len) 
+                el_ind_for_height_dimnames[h]=dimname
+                el_ind_for_height_len[h]=this_len
+ 
     if profile_type == "QVP":
         name_str = 'Quasi-vertical {} {} at an elevation angle of %.1f degrees' % elevation
     elif profile_type == "CVP":
         name_str = 'Column-vertical {} {}'
-
-    # Add variable length type for /VPIndexes entries
-    vlen_t = output.createVLType(np.int32, 'index_vlen')
 
     # Create the field variables
     # for each variable in the list we create several fields
@@ -586,6 +690,7 @@ def output_netcdf(data_list, output_file, profile_type, field_list, elevation, a
         group_data_construct_means = '/'+field+'/Means'
         group_data_construct_deviations = '/' + field + '/StdDevs'
         group_data_construct_counts = '/' + field + '/Counts'
+        group_data_construct_indexes= '/' + field + '/VP_Indexes'
         temp_means = output.createVariable(group_data_construct_means, np.float32, ('Height','Time'))
         temp_stds = output.createVariable(group_data_construct_deviations, np.float32, ('Height', 'Time'))
         temp_counts = output.createVariable(group_data_construct_counts, np.float32, ('Height', 'Time'))
@@ -607,16 +712,19 @@ def output_netcdf(data_list, output_file, profile_type, field_list, elevation, a
             output[field].standard_name = 'Default'
         if indexes_dict[field] is not None:
             # Create variables to store indexes used to calculate vertical profile for this field
-            vp_ind_r = output.createVariable(f'/{field}/VPIndexes/r', vlen_t, ('Height','Time'))
-            vp_ind_az = output.createVariable(f'/{field}/VPIndexes/az', vlen_t, ('Height','Time'))
-            vp_ind_el = output.createVariable(f'/{field}/VPIndexes/el', vlen_t, ('Height','Time'))
-            # Assign values
-            Nh, Nt = vp_ind_r.shape
-            for t in range(Nt):
-                for h in range(Nh):
-                    vp_ind_r[h,t] = indexes_dict[field][t][h][0] # time, height, r
-                    vp_ind_az[h,t] = indexes_dict[field][t][h][1] # time, height, az
-                    vp_ind_el[h,t] = indexes_dict[field][t][h][2] # time, height, el
+            # We have a bitmap of valid indices with a different length for each height
+            for h in range(Nh):
+                # all times for this height should have same length indexes
+                if isinstance(indexes_dict[field][0][h], np.ndarray):
+                    height_name='height_{h:d}'.format(h=h)
+                    varname=group_data_construct_indexes+'/'+height_name+'_el'
+                    vp_ind = output.createVariable(varname, np.byte, (el_ind_for_height_dimnames[h],'Time'))
+                    these_indices=np.zeros((el_ind_for_height_len[h],Nt), int)
+                    for t in range(Nt):
+                        if len(indexes_dict[field][t][h])!=el_ind_for_height_len[h]:
+                            print('ERROR: height', h, 'mismatching lenind', len(indexes_dict[field][t][h]))
+                        these_indices[:,t]=indexes_dict[field][t][h]
+                    vp_ind[:] = these_indices
 
     if profile_type == "QVP":
         # add elevation attribute

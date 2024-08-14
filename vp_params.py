@@ -6,7 +6,7 @@ vp_script="/gws/smf/j04/ncas_radar/rrniii/BioDAR/VP_Extraction/vp_extraction.py"
 #log output location
 log_output="/gws/smf/j04/ncas_radar/rrniii/BioDAR/VP_Extraction/Output/"
 
-data_input = "/gws/smf/j07/ncas_radar/data/ukmo-nimrod/raw_h5_data/single-site/"
+data_input = "/gws/nopw/j04/ncas_radar_vol3/ukmo-nimrod/raw_h5_data/single-site/"
 data_output = "/gws/smf/j07/ncas_radar/data/ukmo-nimrod/"
 
 cvp_params_file = "./Parameters_CVP.xlsx"

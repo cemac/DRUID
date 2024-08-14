@@ -539,26 +539,28 @@ def main():
     elif profile_type == "CVP":
 
         # Get CVP indexes
-        cvp_indexes = vp_functions.static_index_for_csv_file(
-            file_list[0],
-            len(file_list),
-            field_list,
-            lat,
-            lon,
-            alt,
-            met_office=met_office
-        )
+        static_cvp_indices_filename = '{}_{}km_{}_{}_{}_static_cvp_indices.nc'.format(static_point,
+                                                                         avg_range_delta,
+                                                                         min_h, max_h, h_step)
+        # if output dir has a year at the end then remove that to get to directory where cvp
+        # static indices are stored, otherwise use the same directory
+        wsplit=args.output_dir.split('/')
+        if wsplit[-2]==start_datetime.strftime('%Y'):
+            # directory ends with year so remove it
+            s='/'
+            static_dir=s.join(wsplit[:-2])+'/'
+        else:
+            static_dir=args.output_dir
+        static_cvp_indx_pathname=static_dir+'/'+static_cvp_indices_filename
+        static_cvp=vp_io.read_static_cvp_indices(static_cvp_indx_pathname)
 
         # Extract CVP
         data_list = vp_functions.time_height(
             file_list,
             field_list,
-            cvp_indexes=cvp_indexes,
-            avg_range_delta=avg_range_delta,
+            cvp_indexes=static_cvp.get_indxs(),
+            equidistant_alt=static_cvp.heights,
             met_office=met_office,
-            min_h = min_h,
-            max_h = max_h,
-            h_step = h_step,
             store_indexes = store_indexes,
             verbose=verbose,
             vp_mode='cvp_static'
